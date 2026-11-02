@@ -1,6 +1,7 @@
 // =========================================================
-// Silent Stitch Studio — Firebase & Firestore Integration
-// Real-time Order Management & Live Tracking
+// Silent Stitch Studio — Firebase Realtime Integration
+// Supports BOTH Cloud Firestore & Firebase Realtime Database (RTDB)
+// Project: silentstitch-studio
 // =========================================================
 
 // Paste your Firebase Web App credentials below:
@@ -8,18 +9,19 @@
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyYOUR_API_KEY_HERE",
   authDomain: "silentstitch-studio.firebaseapp.com",
+  databaseURL: "https://silentstitch-studio-default-rtdb.firebaseio.com",
   projectId: "silentstitch-studio",
   storageBucket: "silentstitch-studio.appspot.com",
   messagingSenderId: "123456789012",
   appId: "1:123456789012:web:abcdef123456"
 };
 
-// State flag to detect whether live Firebase credentials have been configured
 const isLiveFirebaseConfigured = () => {
   return FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.includes("YOUR_API_KEY_HERE");
 };
 
-let db = null;
+let firestoreDb = null;
+let realtimeDb = null;
 
 // Initialize Firebase if configured
 if (isLiveFirebaseConfigured() && typeof firebase !== "undefined") {
@@ -27,8 +29,16 @@ if (isLiveFirebaseConfigured() && typeof firebase !== "undefined") {
     if (!firebase.apps.length) {
       firebase.initializeApp(FIREBASE_CONFIG);
     }
-    db = firebase.firestore();
-    console.log("🌸 Connected to live Google Cloud Firestore!");
+    // Initialize Firestore if available
+    if (typeof firebase.firestore === "function") {
+      firestoreDb = firebase.firestore();
+      console.log("🌸 Connected to Cloud Firestore!");
+    }
+    // Initialize Realtime Database (RTDB) if available
+    if (typeof firebase.database === "function") {
+      realtimeDb = firebase.database();
+      console.log("🌸 Connected to Firebase Realtime Database (silentstitch-studio-default-rtdb)!");
+    }
   } catch (err) {
     console.warn("Firebase initialization notice:", err);
   }
@@ -45,38 +55,53 @@ function getLocalOrders() {
 }
 function setLocalOrders(orders) {
   localStorage.setItem(LOCAL_ORDERS_KEY, JSON.stringify(orders));
-  // Notify any active local listeners
   window.dispatchEvent(new CustomEvent("silentstitch_order_updated"));
 }
 
 /**
- * Save a new order to Cloud Firestore (with local fallback)
+ * Save a new order to Realtime Database / Firestore (with local fallback)
  * @param {Object} orderData
  * @returns {Promise<string>} orderId
  */
 async function saveOrderToFirestore(orderData) {
-  // Add server timestamps
   const order = {
     ...orderData,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
-  if (db) {
+  let saved = false;
+
+  // 1. Write to Realtime Database if connected
+  if (realtimeDb) {
     try {
-      await db.collection("orders").doc(order.orderId).set(order);
-      console.log("✅ Order saved to Cloud Firestore:", order.orderId);
-      return order.orderId;
+      await realtimeDb.ref("orders/" + order.orderId).set(order);
+      console.log("✅ Order saved to Realtime Database:", order.orderId);
+      saved = true;
     } catch (err) {
-      console.error("Firestore write failed, falling back to local store:", err);
+      console.error("RTDB write notice:", err);
     }
   }
 
-  // Fallback to local storage
+  // 2. Write to Firestore if connected
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection("orders").doc(order.orderId).set(order);
+      console.log("✅ Order saved to Cloud Firestore:", order.orderId);
+      saved = true;
+    } catch (err) {
+      console.error("Firestore write notice:", err);
+    }
+  }
+
+  // Always keep in local reactive store as well
   const existing = getLocalOrders();
   existing.unshift(order);
   setLocalOrders(existing);
-  console.log("💾 Order stored in local reactive store:", order.orderId);
+
+  if (!saved) {
+    console.log("💾 Order stored in local reactive store:", order.orderId);
+  }
   return order.orderId;
 }
 
@@ -87,13 +112,20 @@ async function saveOrderToFirestore(orderData) {
  * @returns {function} Unsubscribe function
  */
 function listenToOrder(orderId, onUpdate) {
-  if (db) {
-    const unsub = db.collection("orders").doc(orderId).onSnapshot((doc) => {
-      if (doc.exists) {
-        onUpdate(doc.data());
-      } else {
-        onUpdate(null);
-      }
+  // Realtime Database listener
+  if (realtimeDb) {
+    const orderRef = realtimeDb.ref("orders/" + orderId);
+    const callback = (snapshot) => {
+      onUpdate(snapshot.val());
+    };
+    orderRef.on("value", callback);
+    return () => orderRef.off("value", callback);
+  }
+
+  // Firestore listener
+  if (firestoreDb) {
+    const unsub = firestoreDb.collection("orders").doc(orderId).onSnapshot((doc) => {
+      onUpdate(doc.exists ? doc.data() : null);
     }, (err) => {
       console.error("Firestore listener error:", err);
     });
@@ -107,7 +139,6 @@ function listenToOrder(orderId, onUpdate) {
     onUpdate(found || null);
   };
 
-  // Initial trigger
   handler();
   window.addEventListener("silentstitch_order_updated", handler);
   return () => window.removeEventListener("silentstitch_order_updated", handler);
@@ -119,8 +150,25 @@ function listenToOrder(orderId, onUpdate) {
  * @returns {function} Unsubscribe function
  */
 function listenToAllOrders(onUpdate) {
-  if (db) {
-    const unsub = db.collection("orders").orderBy("createdAt", "desc").onSnapshot((snapshot) => {
+  // Realtime Database listener
+  if (realtimeDb) {
+    const ordersRef = realtimeDb.ref("orders");
+    const callback = (snapshot) => {
+      const val = snapshot.val();
+      if (!val) {
+        onUpdate([]);
+        return;
+      }
+      const list = Object.values(val).reverse();
+      onUpdate(list);
+    };
+    ordersRef.on("value", callback);
+    return () => ordersRef.off("value", callback);
+  }
+
+  // Firestore listener
+  if (firestoreDb) {
+    const unsub = firestoreDb.collection("orders").orderBy("createdAt", "desc").onSnapshot((snapshot) => {
       const orders = [];
       snapshot.forEach((doc) => orders.push(doc.data()));
       onUpdate(orders);
@@ -152,12 +200,19 @@ async function updateOrderStatus(orderId, newStatus, trackingNote = "") {
   };
   if (trackingNote) updateData.trackingNote = trackingNote;
 
-  if (db) {
+  if (realtimeDb) {
     try {
-      await db.collection("orders").doc(orderId).update(updateData);
-      return true;
+      await realtimeDb.ref("orders/" + orderId).update(updateData);
     } catch (err) {
-      console.error("Failed to update status on Firestore:", err);
+      console.error("RTDB update error:", err);
+    }
+  }
+
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection("orders").doc(orderId).update(updateData);
+    } catch (err) {
+      console.error("Firestore update error:", err);
     }
   }
 
@@ -166,7 +221,6 @@ async function updateOrderStatus(orderId, newStatus, trackingNote = "") {
   if (idx !== -1) {
     orders[idx] = { ...orders[idx], ...updateData };
     setLocalOrders(orders);
-    return true;
   }
-  return false;
+  return true;
 }

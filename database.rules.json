@@ -1,0 +1,10 @@
+{
+  "rules": {
+    "orders": {
+      "$orderId": {
+        ".read": true,
+        ".write": "!data.exists() || auth != null"
+      }
+    }
+  }
+}
