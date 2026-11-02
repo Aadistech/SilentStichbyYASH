@@ -16,6 +16,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
+  <!-- Google Cloud Firebase SDK & Config -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script src="firebase-config.js"></script>
 </head>
 <body>
 
@@ -28,10 +32,11 @@
       </a>
 
       <nav class="nav-desktop" aria-label="Primary">
-        <a href="#collection">Collection</a>
-        <a href="#bespoke">Bespoke Stitching</a>
+        <a href="#drops">Latest Drops</a>
+        <a href="#collection">Collections</a>
+        <a href="#estimator">Bespoke Order</a>
         <a href="#craft">Craftsmanship</a>
-        <a href="#drops">Instagram Feed</a>
+        <a href="#track" id="navTrack">Track Order 🔍</a>
         <a href="#contact">Contact</a>
       </nav>
 
@@ -51,10 +56,11 @@
           <span class="muted small">@silentstitch_studio</span>
         </div>
       </div>
-      <a href="#collection">Collection</a>
-      <a href="#bespoke">Bespoke Stitching</a>
+      <a href="#drops">Latest Drops</a>
+      <a href="#collection">Collections</a>
+      <a href="#estimator">Bespoke Order</a>
       <a href="#craft">Craftsmanship</a>
-      <a href="#drops">Instagram Feed</a>
+      <a href="#track" id="navTrackMobile">Track Order 🔍</a>
       <a href="#contact">Contact</a>
       <a href="#estimator" class="btn btn-primary">Order Custom</a>
     </div>
@@ -228,10 +234,11 @@
       <div>
         <p class="footer-title">Explore</p>
         <ul class="footer-links">
-          <li><a href="#collection">Collection</a></li>
-          <li><a href="#bespoke">Bespoke Stitching</a></li>
-          <li><a href="#craft">Craftsmanship</a></li>
-          <li><a href="#drops">Instagram Feed</a></li>
+          <li><a href="#drops">Latest Drops</a></li>
+          <li><a href="#collection">Collections</a></li>
+          <li><a href="#estimator">Bespoke Order</a></li>
+          <li><a href="#track" id="footTrack">Track Your Order 🔍</a></li>
+          <li><a id="footAdmin" style="cursor:pointer">Studio Portal 🔐</a></li>
         </ul>
       </div>
 

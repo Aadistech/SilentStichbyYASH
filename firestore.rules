@@ -1,0 +1,218 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: /orders/{orderId}
+// Document ID: orderId string (e.g. 'SS-2601-...')
+// Fields:
+//   - orderId: string (required, 5-64 characters, must match URL doc ID, letters/numbers/hyphens/underscores)
+//   - items: list of maps (required, 1-30 items, each item: id, title/name, price, quantity, optional accents, optional colorway)
+//   - totalAmount: number (required, positive integer or float, <= 1,000,000 INR)
+//   - currency: string (required, strictly 'INR')
+//   - customer: map (required, no extra fields)
+//       - name: string (required, 2-80 characters)
+//       - phone: string (required, 10-15 characters, valid phone format)
+//       - email: string (optional, valid email address format, max 100 characters)
+//       - address: string (required, 5-300 characters)
+//       - city: string (required, 2-80 characters)
+//       - pincode: string (required, exactly 6 numeric digits)
+//   - payment: map (required, no extra fields)
+//       - method: string (required, strictly 'UPI')
+//       - status: string (required, 'PENDING_VERIFICATION' or 'PAID')
+//       - upiRef: string (optional, 4-50 characters transaction/UTR reference)
+//       - timestamp: timestamp or ISO date string (required, <= 40 chars if string)
+//   - orderStatus: string (required, initial: 'CONFIRMED' or 'PLACED'; 
+//                          lifecycle transitions: 'IN_PRODUCTION', 'DISPATCHED', 'DELIVERED', 'CANCELLED', 'REFUNDED')
+//   - createdAt: timestamp or ISO date string (required, immutable on update)
+//   - updatedAt: timestamp or ISO date string (required)
+//   - notes: string (optional, customer special requests or notes, max 1000 characters)
+//   - trackingNote: string (optional, studio courier or production note, max 500 characters)
+//
+// Access Patterns:
+//   - Public Customer: Can create a valid order during checkout. Can read ('get')
+//     their individual order using their specific orderId for real-time order tracking.
+//     General queries ('list') are strictly denied to protect customer PII (phone, address).
+//   - Studio Owner / Admin: Authenticated admin with admin claims, role, or verified
+//     studio email ('silentstitchstudio@gmail.com') can read all orders ('get' & 'list'),
+//     update status/tracking/payment verification, and delete records.
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the user is authenticated via Firebase Auth
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if user is a studio administrator (custom claim, token role, or verified studio email)
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        (request.auth.token.email == 'silentstitchstudio@gmail.com' &&
+         request.auth.token.email_verified == true)
+      );
+    }
+
+    // Validate email format with standard pattern
+    function isValidEmail(email) {
+      return email is string &&
+             email.size() >= 3 &&
+             email.size() <= 100 &&
+             email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // Validate timestamp or ISO 8601 date string
+    function isValidTimestampOrDate(val) {
+      return (val is timestamp) ||
+             (val is string &&
+              val.size() >= 10 &&
+              val.size() <= 40 &&
+              val.matches("^[0-9]{4}-[0-9]{2}-[0-9]{2}.*"));
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    // Validate individual cart/order item
+    function isValidItem(item) {
+      return item is map &&
+             item.keys().hasAll(['id', 'price', 'quantity']) &&
+             (('title' in item) || ('name' in item)) &&
+             item.keys().hasOnly(['id', 'title', 'name', 'price', 'quantity', 'accents', 'colorway']) &&
+             item.id is string && item.id.size() > 0 && item.id.size() <= 64 &&
+             (!('title' in item) || (item.title is string && item.title.size() > 0 && item.title.size() <= 120)) &&
+             (!('name' in item) || (item.name is string && item.name.size() > 0 && item.name.size() <= 120)) &&
+             (item.price is int || item.price is float || item.price is number) && item.price >= 0 && item.price <= 500000 &&
+             (item.quantity is int || item.quantity is number) && item.quantity >= 1 && item.quantity <= 100 &&
+             (!('accents' in item) || (item.accents is string && item.accents.size() <= 120)) &&
+             (!('colorway' in item) || (item.colorway is string && item.colorway.size() <= 120));
+    }
+
+    // Validate customer contact and delivery address details
+    function isValidCustomer(customer) {
+      return customer is map &&
+             customer.keys().hasAll(['name', 'phone', 'address', 'city', 'pincode']) &&
+             customer.keys().hasOnly(['name', 'phone', 'email', 'address', 'city', 'pincode']) &&
+             customer.name is string && customer.name.size() >= 2 && customer.name.size() <= 80 &&
+             customer.phone is string && customer.phone.size() >= 10 && customer.phone.size() <= 15 && customer.phone.matches("^[+0-9 -]+$") &&
+             customer.address is string && customer.address.size() >= 5 && customer.address.size() <= 300 &&
+             customer.city is string && customer.city.size() >= 2 && customer.city.size() <= 80 &&
+             customer.pincode is string && customer.pincode.size() == 6 && customer.pincode.matches("^[0-9]{6}$") &&
+             (!('email' in customer) || isValidEmail(customer.email));
+    }
+
+    // Validate UPI payment block
+    function isValidPayment(payment) {
+      return payment is map &&
+             payment.keys().hasAll(['method', 'status', 'timestamp']) &&
+             payment.keys().hasOnly(['method', 'status', 'timestamp', 'upiRef']) &&
+             payment.method == 'UPI' &&
+             payment.status in ['PENDING_VERIFICATION', 'PAID'] &&
+             isValidTimestampOrDate(payment.timestamp) &&
+             (!('upiRef' in payment) || (payment.upiRef is string && payment.upiRef.size() >= 4 && payment.upiRef.size() <= 50));
+    }
+
+    // Comprehensive document validator (used for both create and update)
+    function isValidOrder(data, docOrderId) {
+      return data.keys().hasAll([
+               'orderId', 'items', 'totalAmount', 'currency',
+               'customer', 'payment', 'orderStatus', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'orderId', 'items', 'totalAmount', 'currency',
+               'customer', 'payment', 'orderStatus', 'createdAt', 'updatedAt',
+               'notes', 'trackingNote'
+             ]) &&
+             data.orderId is string &&
+             data.orderId.size() >= 5 &&
+             data.orderId.size() <= 64 &&
+             data.orderId == docOrderId &&
+             data.orderId.matches("^[A-Za-z0-9_-]+$") &&
+             data.currency == 'INR' &&
+             (data.totalAmount is int || data.totalAmount is float || data.totalAmount is number) &&
+             data.totalAmount > 0 &&
+             data.totalAmount <= 1000000 &&
+             data.items is list &&
+             data.items.size() >= 1 &&
+             data.items.size() <= 30 &&
+             isValidItem(data.items[0]) &&
+             isValidCustomer(data.customer) &&
+             isValidPayment(data.payment) &&
+             isValidTimestampOrDate(data.createdAt) &&
+             isValidTimestampOrDate(data.updatedAt) &&
+             data.orderStatus in [
+               'CONFIRMED', 'PLACED', 'IN_PRODUCTION', 'DISPATCHED',
+               'DELIVERED', 'CANCELLED', 'REFUNDED'
+             ] &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             (!('trackingNote' in data) || (data.trackingNote is string && data.trackingNote.size() <= 500));
+    }
+
+    // Ensure critical financial, order, and customer fields remain immutable during updates
+    function areOrderImmutableFieldsUnchanged() {
+      return request.resource.data.orderId == resource.data.orderId &&
+             request.resource.data.createdAt == resource.data.createdAt &&
+             request.resource.data.totalAmount == resource.data.totalAmount &&
+             request.resource.data.currency == resource.data.currency &&
+             request.resource.data.customer == resource.data.customer &&
+             request.resource.data.items == resource.data.items &&
+             !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+               'orderId', 'createdAt', 'totalAmount', 'currency', 'customer', 'items'
+             ]);
+    }
+
+    // Validate admin updates to order status, delivery notes, and payment verification
+    function isValidOrderUpdate() {
+      return isAdmin() &&
+             isValidOrder(request.resource.data, resource.data.orderId) &&
+             areOrderImmutableFieldsUnchanged() &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+               'orderStatus', 'updatedAt', 'trackingNote', 'payment'
+             ]);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // Orders collection
+    match /orders/{orderId} {
+      // 1. Single-order read: Customers can track their individual order in real-time
+      //    using the specific orderId received at checkout.
+      allow get: if true;
+
+      // 2. Collection listing: General queries are restricted to studio administrators
+      //    to prevent customer PII harvesting, enumeration, and data scraping attacks.
+      allow list: if isAdmin();
+
+      // 3. Order creation: Public customers can submit checkout orders adhering
+      //    to strict schema validation, type checks, size limits, and initial status.
+      allow create: if isValidOrder(request.resource.data, orderId) &&
+                       request.resource.data.orderStatus in ['CONFIRMED', 'PLACED'];
+
+      // 4. Order update: Only studio administrators can update order status,
+      //    add tracking notes, or update payment verification status.
+      allow update: if isValidOrderUpdate();
+
+      // 5. Order deletion: Restricted to studio administrators.
+      allow delete: if isAdmin();
+    }
+
+    // Default deny all access to any unmapped paths or subcollections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

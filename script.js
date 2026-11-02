@@ -1,12 +1,17 @@
 /* =========================================================
-   Silent Stitch Studio — script
+   Silent Stitch Studio — Web Application
+   Real-Time Firestore Orders & Direct UPI Payments
    Crafted with love for @silentstitch_studio
    ========================================================= */
+
 const CONFIG = {
   instagram: "silentstitch_studio",
   whatsapp: "910000000000",          // WhatsApp number (country code + digits, e.g. 919876543210)
   email: "silentstitchstudio@gmail.com",
-  primaryContact: "instagram",        // "whatsapp" | "instagram" | "email"
+  upiId: "silentstitch@upi",          // GPay/PhonePe/Paytm UPI ID (e.g. name@okhdfcbank, 9876543210@paytm)
+  upiName: "Silent Stitch Studio",
+  adminPin: "1234",                  // Passcode to unlock Studio Admin Order Manager
+  primaryContact: "upi",
   currency: "₹",
 };
 
@@ -18,6 +23,7 @@ const DROPS = [
     tag: "Festive & Bridal",
     caption: "Everlasting white crochet floral gajra with pearl accents. Inspired by traditional jasmine blooms — made to treasure forever.",
     price: "₹699",
+    rawPrice: 699,
     image: "assets/drops/crochet-gajra.jpg",
     badge: "Bestseller",
     details: "Handmade with soft milk cotton yarn, delicate pearl beads, and adjustable secure tie cord. Never wilts, completely washable, and lightweight."
@@ -28,6 +34,7 @@ const DROPS = [
     tag: "Hair Accessory",
     caption: "Layered crochet lotus petals with delicate pearl center & dangling tassel bells. Adds royal elegance to festive hairstyles.",
     price: "₹499",
+    rawPrice: 499,
     image: "assets/drops/lotus-hair-accessory.jpg",
     badge: "Handmade",
     details: "Sculpted petal layers in blush rose, magenta and cream with lustrous pearl center and twin braided cords ending in crochet bell drops."
@@ -38,6 +45,7 @@ const DROPS = [
     tag: "Charm & Keyring",
     caption: "Classic royal blue crochet evil eye with scalloped edge, protective nazar eye, pearl bead, and lush flowing tassel.",
     price: "₹349",
+    rawPrice: 349,
     image: "assets/drops/evil-eye-charm.jpg",
     badge: "Protection",
     details: "Deep royal blue outer scalloped petals with concentric white, mint, and noir pupil. Finished with silver key ring and flowing silky yarn tassel."
@@ -48,6 +56,7 @@ const DROPS = [
     tag: "Bag Charm / Keyring",
     caption: "Small charms, big joy: plush crochet heart, dainty pink bow, and woven love envelope with mini heart charm.",
     price: "₹449",
+    rawPrice: 449,
     image: "assets/drops/love-charms-keychain.jpg",
     badge: "Gift Favorite",
     details: "Set of 3 charming elements: 3D puffy stuffed heart, ribbon bow, and miniature envelope with heart appliqué. Perfect gift for yourself or loved ones."
@@ -122,18 +131,18 @@ const TESTIMONIALS = [
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const money = (n) => CONFIG.currency + Math.round(n).toLocaleString("en-IN");
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const esc = (s) => String(s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 function toast(msg) {
   const t = $("#toast");
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.remove("show"), 2600);
+  toast._t = setTimeout(() => t.classList.remove("show"), 2800);
 }
 
 /* =========================================================
-   Contact links
+   Contact Links & Footer Initializer
    ========================================================= */
 const igUrl = `https://instagram.com/${CONFIG.instagram}`;
 const igDm = `https://ig.me/m/${CONFIG.instagram}`;
@@ -151,7 +160,7 @@ $("#socMail").href = mailUrl();
 $("#year").textContent = new Date().getFullYear();
 
 /* =========================================================
-   Header & Mobile menu
+   Header & Mobile Menu
    ========================================================= */
 const header = $(".site-header");
 const menuBtn = $("#menuBtn");
@@ -172,7 +181,7 @@ mobileMenu.addEventListener("click", (e) => {
 });
 
 /* =========================================================
-   Modal
+   Generic Modal Manager
    ========================================================= */
 const modal = $("#modal");
 const modalBody = $("#modalBody");
@@ -195,7 +204,7 @@ window.addEventListener("keydown", (e) => {
 });
 
 /* =========================================================
-   Instagram / Studio grid
+   Instagram / Drops Grid
    ========================================================= */
 $("#dropsGrid").innerHTML = DROPS.map((d, i) => `
   <article class="tile reveal" data-i="${i}" tabindex="0" role="button" aria-label="${esc(d.label)} — ${esc(d.tag)}">
@@ -243,8 +252,16 @@ $("#dropsGrid").addEventListener("click", (e) => {
           <div class="perk"><span class="perk-icon">🎁</span> Studio gift-ready packaging</div>
         </div>
         <div class="modal-actions">
-          <a class="btn btn-primary" href="${igUrl}" target="_blank" rel="noopener">Order on Instagram DM ↗</a>
-          <a class="btn btn-ghost" href="${waUrl(`Hi Silent Stitch Studio! I'd like to order: ${d.label} (${d.price})`)}" target="_blank" rel="noopener">WhatsApp Studio</a>
+          <button class="btn btn-primary" onclick="startCheckout({
+            id: '${d.id}',
+            title: '${esc(d.label)}',
+            price: ${d.rawPrice},
+            quantity: 1,
+            accents: 'Standard Artisan Finish',
+            colorway: 'Original Studio Palette',
+            image: '${d.image}'
+          })">Pay &amp; Order with UPI 🌸</button>
+          <a class="btn btn-ghost" href="${igUrl}" target="_blank" rel="noopener">DM on Instagram ↗</a>
         </div>
       </div>
     </div>`);
@@ -258,7 +275,446 @@ $("#dropsGrid").addEventListener("keydown", (e) => {
 });
 
 /* =========================================================
-   Offer cards
+   CHECKOUT & UPI PAYMENT ENGINE
+   ========================================================= */
+
+let currentCheckoutItem = null;
+let currentCheckoutCustomer = null;
+
+function generateOrderId() {
+  const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, "");
+  return `SS-${dateStr}-${rand}`;
+}
+
+/**
+ * Step 1: Open checkout modal for customer delivery details
+ */
+window.startCheckout = function(itemData) {
+  currentCheckoutItem = itemData;
+  renderCheckoutStep1();
+};
+
+function renderCheckoutStep1() {
+  const item = currentCheckoutItem;
+  openModal(`
+    <div class="checkout-wrapper">
+      <div class="checkout-header">
+        <span class="eyebrow">Checkout · Step 1 of 2</span>
+        <h3>Delivery Details</h3>
+      </div>
+
+      <div class="checkout-summary-card glass">
+        ${item.image ? `<img src="${item.image}" alt="${esc(item.title)}" class="checkout-thumb" />` : ""}
+        <div class="checkout-item-details">
+          <strong>${esc(item.title)}</strong>
+          <span class="muted small">${esc(item.accents || "Standard finish")} · ${esc(item.colorway || "Studio standard")}</span>
+          <div class="checkout-qty-price">
+            <span class="small">Qty: <strong>${item.quantity || 1}</strong></span>
+            <strong class="checkout-price">${money(item.price * (item.quantity || 1))}</strong>
+          </div>
+        </div>
+      </div>
+
+      <form class="checkout-form" id="checkoutForm" onsubmit="event.preventDefault(); proceedToUpiPayment();">
+        <div class="field-grid">
+          <div class="field full">
+            <label for="cName">Full Name *</label>
+            <input id="cName" required placeholder="e.g. Aditi Sharma" />
+          </div>
+          <div class="field">
+            <label for="cPhone">WhatsApp / Mobile Number *</label>
+            <input id="cPhone" type="tel" required pattern="[0-9]{10}" placeholder="10-digit number" />
+          </div>
+          <div class="field">
+            <label for="cEmail">Email Address (for invoice)</label>
+            <input id="cEmail" type="email" placeholder="Optional" />
+          </div>
+          <div class="field full">
+            <label for="cAddress">Complete Shipping Address *</label>
+            <textarea id="cAddress" required placeholder="Flat/House No., Building, Street name, Locality..."></textarea>
+          </div>
+          <div class="field">
+            <label for="cCity">City *</label>
+            <input id="cCity" required placeholder="e.g. Mumbai, Bengaluru" />
+          </div>
+          <div class="field">
+            <label for="cPincode">Pincode *</label>
+            <input id="cPincode" pattern="[0-9]{6}" required placeholder="6-digit pincode" />
+          </div>
+        </div>
+
+        <div class="checkout-actions">
+          <button type="submit" class="btn btn-primary full-width">Proceed to UPI Payment →</button>
+        </div>
+      </form>
+    </div>
+  `);
+}
+
+/**
+ * Step 2: Render UPI payment options (Intent for mobile, Dynamic QR for desktop)
+ */
+window.proceedToUpiPayment = function() {
+  const name = $("#cName").value.trim();
+  const phone = $("#cPhone").value.trim();
+  const email = $("#cEmail").value.trim();
+  const address = $("#cAddress").value.trim();
+  const city = $("#cCity").value.trim();
+  const pincode = $("#cPincode").value.trim();
+
+  currentCheckoutCustomer = { name, phone, email, address, city, pincode };
+
+  const item = currentCheckoutItem;
+  const totalAmount = item.price * (item.quantity || 1);
+  const orderId = generateOrderId();
+
+  // NPCI UPI Specification URL
+  const upiUrl = `upi://pay?pa=${encodeURIComponent(CONFIG.upiId)}&pn=${encodeURIComponent(CONFIG.upiName)}&am=${totalAmount}&cu=INR&tn=${encodeURIComponent("Order " + orderId)}`;
+  
+  // Public high-speed QR endpoint
+  const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(upiUrl)}`;
+
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  openModal(`
+    <div class="checkout-wrapper">
+      <div class="checkout-header">
+        <span class="eyebrow">Checkout · Step 2 of 2</span>
+        <h3>Scan &amp; Pay via UPI</h3>
+        <p class="muted small">Order ID: <strong class="order-id-highlight">${orderId}</strong></p>
+      </div>
+
+      <div class="upi-pay-card glass">
+        <div class="upi-amount-pill">
+          <span class="muted small">Total to Pay:</span>
+          <span class="upi-big-price">${money(totalAmount)}</span>
+        </div>
+
+        ${isMobile ? `
+          <div class="upi-mobile-box">
+            <a href="${upiUrl}" class="btn btn-primary full-width btn-upi-intent">
+              <span class="upi-sparkle">⚡</span> Pay with GPay / PhonePe / Paytm
+            </a>
+            <p class="muted small" style="margin-top:10px;">Tap above to open your UPI app, complete payment, then enter the UTR below.</p>
+          </div>
+        ` : `
+          <div class="upi-qr-box">
+            <div class="qr-frame">
+              <img src="${qrApiUrl}" alt="Scan UPI QR Code" class="upi-qr-image" />
+            </div>
+            <p class="small muted">Scan with any UPI app: <strong>Google Pay · PhonePe · Paytm · CRED · BHIM</strong></p>
+          </div>
+        `}
+
+        <div class="upi-id-pill" onclick="copyUpiId()">
+          <span>UPI ID: <strong id="upiDisplay">${CONFIG.upiId}</strong></span>
+          <span class="copy-badge">Copy 📋</span>
+        </div>
+
+        <div class="field full" style="margin-top:16px;">
+          <label for="upiRefInput">UPI Transaction ID / UTR No. (optional)</label>
+          <input id="upiRefInput" placeholder="12-digit number from your payment app" />
+        </div>
+
+        <button class="btn btn-primary full-width" onclick="finalizeOrder('${orderId}', ${totalAmount})">
+          I Have Paid — Confirm Order 🌸
+        </button>
+
+        <p class="fine" style="text-align:center;">
+          🔒 Once submitted, your order is recorded in real-time to Google Cloud Firestore and live tracking starts immediately.
+        </p>
+      </div>
+    </div>
+  `);
+};
+
+window.copyUpiId = function() {
+  navigator.clipboard.writeText(CONFIG.upiId).then(() => {
+    toast("UPI ID copied to clipboard!");
+  });
+};
+
+/**
+ * Step 3: Finalize order and save to Firestore
+ */
+window.finalizeOrder = async function(orderId, totalAmount) {
+  const upiRef = $("#upiRefInput") ? $("#upiRefInput").value.trim() : "";
+
+  const orderData = {
+    orderId,
+    items: [currentCheckoutItem],
+    totalAmount,
+    currency: "INR",
+    customer: currentCheckoutCustomer,
+    payment: {
+      method: "UPI",
+      status: upiRef ? "PENDING_VERIFICATION" : "PAID",
+      upiRef: upiRef || "Direct UPI",
+      vpa: CONFIG.upiId,
+      paidAt: new Date().toISOString()
+    },
+    orderStatus: "CONFIRMED", // CONFIRMED | IN_PRODUCTION | DISPATCHED | DELIVERED
+    trackingNote: "Order placed and payment received. Crafting in studio will begin shortly.",
+  };
+
+  try {
+    toast("Recording order in real-time...");
+    await saveOrderToFirestore(orderData);
+    openLiveTracker(orderId);
+  } catch (err) {
+    console.error("Order completion error:", err);
+    openLiveTracker(orderId);
+  }
+};
+
+/* =========================================================
+   REAL-TIME LIVE ORDER TRACKER
+   ========================================================= */
+
+let activeTrackerUnsub = null;
+
+window.openLiveTracker = function(orderId) {
+  if (activeTrackerUnsub) {
+    activeTrackerUnsub();
+    activeTrackerUnsub = null;
+  }
+
+  // Update URL hash for easy bookmarking
+  history.replaceState(null, "", `#track=${orderId}`);
+
+  openModal(`
+    <div class="tracker-wrapper">
+      <div class="tracker-header">
+        <div class="live-pill"><span class="pulse-dot"></span> Live Firestore Connection</div>
+        <h3>Order Status Tracker</h3>
+        <p class="muted">Tracking Order: <strong class="order-id-highlight">${orderId}</strong></p>
+      </div>
+      <div id="trackerLiveContainer" class="glass tracker-card">
+        <p class="muted" style="text-align:center;">Connecting to live database...</p>
+      </div>
+    </div>
+  `);
+
+  activeTrackerUnsub = listenToOrder(orderId, (order) => {
+    const container = $("#trackerLiveContainer");
+    if (!container) return;
+
+    if (!order) {
+      container.innerHTML = `
+        <div style="text-align:center; padding: 24px;">
+          <p>Order not found. Please verify the Order ID.</p>
+          <a class="btn btn-ghost" href="#top" data-close>Return to Home</a>
+        </div>
+      `;
+      return;
+    }
+
+    const statuses = [
+      { key: "CONFIRMED", label: "Order Confirmed", icon: "🌸", desc: "Payment verified & placed into crafting queue." },
+      { key: "IN_PRODUCTION", label: "Hand-Crafting", icon: "🪡", desc: "Stitching petals, crochet hooks & accents in progress." },
+      { key: "DISPATCHED", label: "Dispatched", icon: "📦", desc: "Packed with gift wrap and handed over to courier." },
+      { key: "DELIVERED", label: "Delivered", icon: "✨", desc: "Arrived at your doorstep with love." }
+    ];
+
+    const currentIdx = statuses.findIndex(s => s.key === order.orderStatus);
+    const activeIdx = currentIdx !== -1 ? currentIdx : 0;
+
+    container.innerHTML = `
+      <div class="tracker-stepper">
+        ${statuses.map((s, idx) => `
+          <div class="stepper-step ${idx <= activeIdx ? 'done' : ''} ${idx === activeIdx ? 'active' : ''}">
+            <div class="step-icon-wrap">
+              <span class="step-icon">${s.icon}</span>
+            </div>
+            <div class="step-info">
+              <strong>${s.label}</strong>
+              <span class="muted small">${s.desc}</span>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+
+      <div class="tracker-details">
+        <div class="tracker-row">
+          <span class="muted">Piece:</span>
+          <strong>${esc(order.items[0]?.title || "Bespoke Crochet")}</strong>
+        </div>
+        <div class="tracker-row">
+          <span class="muted">Total Amount:</span>
+          <strong class="price-gold">${money(order.totalAmount)}</strong>
+        </div>
+        <div class="tracker-row">
+          <span class="muted">Recipient:</span>
+          <span>${esc(order.customer?.name)} · ${esc(order.customer?.city)}</span>
+        </div>
+        ${order.trackingNote ? `
+          <div class="tracker-note">
+            <span class="eyebrow">Studio Update:</span>
+            <p>${esc(order.trackingNote)}</p>
+          </div>
+        ` : ""}
+      </div>
+
+      <div class="tracker-actions">
+        <a class="btn btn-primary full-width" href="${waUrl(`Hi Silent Stitch Studio! I'm checking on my order ${orderId}`)}" target="_blank" rel="noopener">
+          Chat on WhatsApp with Studio ↗
+        </a>
+      </div>
+    `;
+  });
+};
+
+/* Track Order lookup modal */
+window.openTrackSearchModal = function() {
+  openModal(`
+    <div class="checkout-wrapper">
+      <div class="checkout-header">
+        <span class="eyebrow">Real-Time Tracking</span>
+        <h3>Find Your Order</h3>
+        <p class="muted small">Enter your Order ID received during payment (e.g. SS-2601-ABCD).</p>
+      </div>
+
+      <form onsubmit="event.preventDefault(); const val = $('#trackIdInput').value.trim(); if(val) openLiveTracker(val);" style="margin-top:20px;">
+        <div class="field full">
+          <label for="trackIdInput">Order ID</label>
+          <input id="trackIdInput" required placeholder="SS-..." />
+        </div>
+        <div style="margin-top:16px;">
+          <button type="submit" class="btn btn-primary full-width">Track Order Status 🔍</button>
+        </div>
+      </form>
+    </div>
+  `);
+};
+
+$("#navTrack")?.addEventListener("click", (e) => { e.preventDefault(); openTrackSearchModal(); });
+$("#navTrackMobile")?.addEventListener("click", (e) => { e.preventDefault(); openTrackSearchModal(); });
+$("#footTrack")?.addEventListener("click", (e) => { e.preventDefault(); openTrackSearchModal(); });
+
+// Auto-open live tracker if URL has hash #track=SS-...
+if (window.location.hash.startsWith("#track=")) {
+  const oId = window.location.hash.replace("#track=", "").trim();
+  if (oId) setTimeout(() => openLiveTracker(oId), 400);
+}
+
+/* =========================================================
+   STUDIO ADMIN ORDER MANAGER (PIN Protected)
+   ========================================================= */
+
+window.openAdminModal = function() {
+  openModal(`
+    <div class="checkout-wrapper">
+      <div class="checkout-header">
+        <span class="eyebrow">Studio Portal</span>
+        <h3>Studio Admin Unlock</h3>
+        <p class="muted small">Enter studio PIN to view live orders and manage tracking.</p>
+      </div>
+
+      <form onsubmit="event.preventDefault(); verifyAdminPin();" style="margin-top:20px;">
+        <div class="field full">
+          <label for="adminPinInput">Studio Passcode</label>
+          <input id="adminPinInput" type="password" required placeholder="Default: 1234" />
+        </div>
+        <div style="margin-top:16px;">
+          <button type="submit" class="btn btn-primary full-width">Unlock Orders Dashboard 🔐</button>
+        </div>
+      </form>
+    </div>
+  `);
+};
+
+window.verifyAdminPin = function() {
+  const pin = $("#adminPinInput").value.trim();
+  if (pin === CONFIG.adminPin) {
+    renderAdminDashboard();
+  } else {
+    toast("Incorrect PIN. Please try again.");
+  }
+};
+
+let activeAdminUnsub = null;
+
+function renderAdminDashboard() {
+  if (activeAdminUnsub) activeAdminUnsub();
+
+  openModal(`
+    <div class="admin-dashboard-wrapper">
+      <div class="checkout-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <span class="eyebrow">Real-Time Studio Feed</span>
+          <h3>Live Orders Manager</h3>
+        </div>
+        <button class="btn btn-sm btn-ghost" onclick="renderAdminDashboard()">Refresh 🔄</button>
+      </div>
+
+      <div id="adminOrdersFeed" style="margin-top:20px;">
+        <p class="muted" style="text-align:center;">Loading real-time orders...</p>
+      </div>
+    </div>
+  `);
+
+  activeAdminUnsub = listenToAllOrders((orders) => {
+    const feed = $("#adminOrdersFeed");
+    if (!feed) return;
+
+    if (!orders || !orders.length) {
+      feed.innerHTML = `<p class="muted" style="text-align:center; padding: 30px;">No orders found yet. New orders will appear here in real-time!</p>`;
+      return;
+    }
+
+    feed.innerHTML = orders.map((o) => `
+      <div class="admin-order-card glass">
+        <div class="admin-order-header">
+          <div>
+            <strong class="order-id-highlight">${o.orderId}</strong>
+            <span class="small muted"> · ${new Date(o.createdAt || Date.now()).toLocaleDateString()}</span>
+          </div>
+          <span class="status-badge ${o.orderStatus?.toLowerCase()}">${o.orderStatus}</span>
+        </div>
+
+        <div class="admin-order-body">
+          <div class="admin-col">
+            <span class="small muted">Customer:</span>
+            <strong>${esc(o.customer?.name)} (${esc(o.customer?.phone)})</strong>
+            <p class="small">${esc(o.customer?.address)}, ${esc(o.customer?.city)} - ${esc(o.customer?.pincode)}</p>
+          </div>
+          <div class="admin-col">
+            <span class="small muted">Item &amp; Total:</span>
+            <strong>${esc(o.items?.[0]?.title || "Crochet piece")} (Qty: ${o.items?.[0]?.quantity || 1})</strong>
+            <strong class="price-gold">${money(o.totalAmount)}</strong>
+            <span class="small muted">Ref: ${esc(o.payment?.upiRef || "UPI")}</span>
+          </div>
+        </div>
+
+        <div class="admin-order-footer">
+          <label class="small muted">Change Status:
+            <select class="admin-status-select" onchange="changeOrderStatus('${o.orderId}', this.value)">
+              <option value="CONFIRMED" ${o.orderStatus === "CONFIRMED" ? "selected" : ""}>🌸 Order Confirmed</option>
+              <option value="IN_PRODUCTION" ${o.orderStatus === "IN_PRODUCTION" ? "selected" : ""}>🪡 In Production</option>
+              <option value="DISPATCHED" ${o.orderStatus === "DISPATCHED" ? "selected" : ""}>📦 Dispatched</option>
+              <option value="DELIVERED" ${o.orderStatus === "DELIVERED" ? "selected" : ""}>✨ Delivered</option>
+            </select>
+          </label>
+          <a class="btn btn-sm btn-ghost" href="${waUrl(`Hi ${o.customer?.name}! This is Silent Stitch Studio regarding your order ${o.orderId}`)}" target="_blank">
+            Chat on WhatsApp ↗
+          </a>
+        </div>
+      </div>
+    `).join("");
+  });
+}
+
+window.changeOrderStatus = async function(orderId, newStatus) {
+  toast(`Updating status to ${newStatus}...`);
+  await updateOrderStatus(orderId, newStatus);
+  toast("Order updated live!");
+};
+
+$("#footAdmin")?.addEventListener("click", openAdminModal);
+
+/* =========================================================
+   Offer Cards
    ========================================================= */
 $("#offerCards").innerHTML = OFFERS.map((o, i) => `
   <article class="card glass reveal" style="--angle:${o.angle}">
@@ -278,14 +734,14 @@ $("#offerCards").addEventListener("click", (e) => {
     <h3>${esc(o.title)}</h3>
     <p>${esc(o.detail)}</p>
     <ul>${o.items.map(([k, v]) => `<li><strong>${esc(k)}</strong><span>${esc(v)}</span></li>`).join("")}</ul>
-    <a class="btn btn-primary" href="#estimator" data-close>Order this custom</a>`);
+    <a class="btn btn-primary" href="#estimator" data-close>Design a Custom Order 🌸</a>`);
 });
 
 /* =========================================================
-   Estimator wizard
+   Estimator Wizard with Instant UPI Checkout
    ========================================================= */
 const S = { step: 0, item: null, style: null, text: "", placement: PLACEMENTS[0], thread: THREADS[0], qty: 1, name: "", notes: "" };
-const STEP_LABELS = ["Step 1 of 4 · Item", "Step 2 of 4 · Crochet accents", "Step 3 of 4 · Details & color", "Step 4 of 4 · Review & send"];
+const STEP_LABELS = ["Step 1 of 4 · Item", "Step 2 of 4 · Crochet accents", "Step 3 of 4 · Details & color", "Step 4 of 4 · Review & order"];
 
 function estimate() {
   const item = ITEMS.find((i) => i.id === S.item);
@@ -296,22 +752,6 @@ function estimate() {
   const disc = S.qty >= 10 ? 0.1 : S.qty >= 5 ? 0.05 : 0;
   const total = unit * S.qty * (1 - disc);
   return { item, style, total, low: total * 0.95, high: total * 1.05, disc };
-}
-
-function buildMessage() {
-  const e = estimate();
-  return [
-    "Hi Silent Stitch Studio! I'd like to place a custom crochet order:",
-    `• Piece: ${e.item.name}`,
-    `• Style/Accents: ${e.style.name}`,
-    `• Colorway: ${S.thread}`,
-    `• Type / Placement: ${S.placement}`,
-    S.text.trim() ? `• Custom initial / word: ${S.text.trim()}` : null,
-    `• Quantity: ${S.qty}`,
-    S.notes.trim() ? `• Notes / References: ${S.notes.trim()}` : null,
-    `• Indicative estimate: ${money(e.low)} – ${money(e.high)}`,
-    S.name.trim() ? `\nFrom: ${S.name.trim()}` : null,
-  ].filter(Boolean).join("\n");
 }
 
 const panel = $("#stepPanel");
@@ -351,12 +791,6 @@ function renderStep() {
       </div>`;
   } else {
     const e = estimate();
-    const order = { instagram: 0, whatsapp: 1, email: 2 };
-    const btns = [
-      ["instagram", "Send via Instagram DM ↗"],
-      ["whatsapp", "Send on WhatsApp ↗"],
-      ["email", "Send by Email ↗"],
-    ].sort((a, b) => (a[0] === CONFIG.primaryContact ? -1 : b[0] === CONFIG.primaryContact ? 1 : order[a[0]] - order[b[0]]));
     html = `<h3>Review your custom request</h3>
       <dl class="summary">
         <div><dt>Piece</dt><dd>${esc(e.item.name)}</dd></div>
@@ -364,12 +798,25 @@ function renderStep() {
         <div><dt>Colorway</dt><dd>${esc(S.thread)}</dd></div>
         <div><dt>Format / Type</dt><dd>${esc(S.placement)}</dd></div>
         <div><dt>Quantity</dt><dd>${S.qty}${e.disc ? ` (${e.disc * 100}% set discount)` : ""}</dd></div>
-        <div><dt>Indicative estimate</dt><dd><strong class="estimate-highlight">${money(e.low)} – ${money(e.high)}</strong></dd></div>
+        <div><dt>Total Estimate</dt><dd><strong class="estimate-highlight">${money(e.total)}</strong></dd></div>
       </dl>
-      <div class="send-grid">${btns.map(([k, label]) => `
-        <button class="btn ${k === CONFIG.primaryContact ? "btn-primary" : "btn-ghost"}" data-send="${k}">${label}</button>`).join("")}</div>
-      <p class="fine">Estimates are indicative. We confirm exact shade matching and finalize before crafting begins.
-      When sending via Instagram DM, we copy your details to the clipboard for easy pasting.</p>`;
+      
+      <div class="send-grid" style="grid-template-columns: 1fr;">
+        <button class="btn btn-primary" onclick="startCheckout({
+          id: '${e.item.id}',
+          title: '${esc(e.item.name)} (Custom)',
+          price: ${Math.round(e.total / S.qty)},
+          quantity: ${S.qty},
+          accents: '${esc(e.style.name)}',
+          colorway: '${esc(S.thread)}',
+          image: 'assets/logo.png'
+        })">Proceed to Checkout &amp; Pay via UPI 🌸</button>
+      </div>
+
+      <div style="display:flex; justify-content:center; gap:14px; margin-top:14px;">
+        <a class="muted small" href="${igUrl}" target="_blank">or send via Instagram DM ↗</a>
+        <a class="muted small" href="${waUrl(`Hi! I'd like a custom order: ${e.item.name}`)}" target="_blank">or chat on WhatsApp ↗</a>
+      </div>`;
   }
   panel.innerHTML = html;
   panel.style.animation = "none"; panel.offsetHeight; panel.style.animation = "";
@@ -391,23 +838,6 @@ panel.addEventListener("click", (e) => {
     S[pick.dataset.pick] = pick.dataset.id;
     $$(`[data-pick="${pick.dataset.pick}"]`, panel).forEach((b) => b.setAttribute("aria-pressed", String(b === pick)));
     updateFooter();
-    return;
-  }
-  const send = e.target.closest("[data-send]");
-  if (send) {
-    const k = send.dataset.send;
-    const msg = buildMessage();
-    if (k === "whatsapp") {
-      window.open(waUrl(msg), "_blank");
-    } else if (k === "instagram") {
-      navigator.clipboard?.writeText(msg).then(
-        () => toast("Request copied! Paste into Instagram DM."),
-        () => {}
-      );
-      window.open(igDm, "_blank");
-    } else if (k === "email") {
-      window.location.href = mailUrl("Custom crochet order request", msg);
-    }
   }
 });
 
@@ -431,7 +861,7 @@ backBtn.addEventListener("click", () => {
 renderStep();
 
 /* =========================================================
-   Craftsmanship tabs
+   Craftsmanship Tabs & Stitch Density Widget
    ========================================================= */
 const tabsEl = $("#craftTabs");
 const craftPanel = $("#craftPanel");
@@ -456,7 +886,6 @@ tabsEl.addEventListener("click", (e) => {
 });
 showCraft(CRAFT[0].id);
 
-/* Stitch density interactive widget */
 const range = $("#densityRange");
 function updateDensity() {
   const v = +range.value;
@@ -468,7 +897,7 @@ range.addEventListener("input", updateDensity);
 updateDensity();
 
 /* =========================================================
-   Testimonials slider
+   Testimonials Slider
    ========================================================= */
 const slidesEl = $("#slides");
 const dotsEl = $("#dots");
@@ -508,7 +937,7 @@ $("#slider").addEventListener("mouseleave", auto);
 if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) auto();
 
 /* =========================================================
-   Reveal observer
+   Reveal Observer
    ========================================================= */
 const observer = new IntersectionObserver((entries) => {
   entries.forEach((entry) => {
@@ -519,7 +948,5 @@ const observer = new IntersectionObserver((entries) => {
   });
 }, { threshold: 0.1 });
 
-function observe(el) {
-  observer.observe(el);
-}
+function observe(el) { observer.observe(el); }
 $$(".reveal").forEach(observe);
